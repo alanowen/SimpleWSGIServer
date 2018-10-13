@@ -4,9 +4,10 @@ import re
 import abc
 import cgi
 # import sys
+import uuid
 import gzip
 # import time
-# import base64
+import base64
 # import ctypes
 # import random
 import doctest
@@ -17,6 +18,7 @@ import logging
 # import datetime
 import mimetypes
 import functools
+from urllib.parse import quote, unquote
 # import importlib
 # import itertools
 import traceback
@@ -299,6 +301,19 @@ class HttpRequest:
         self.environ = environ
         # get form data
         form = cgi.FieldStorage(fp=self.environ['wsgi.input'], environ=self.environ, keep_blank_values=True)
+        for i in environ:
+            print('%s: %s' % (i, environ[i]))
+            CONTENT_TYPE: text/plain
+            # HTTP_HOST: 127.0.0.1:8080
+            # HTTP_CONNECTION: keep-alive
+            # HTTP_PRAGMA: no-cache
+            # HTTP_CACHE_CONTROL: no-cache
+            # HTTP_UPGRADE_INSECURE_REQUESTS: 1
+            # HTTP_USER_AGENT: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) snap Chromium/69.0.3497.100 Chrome/69.0.3497.100 Safari/537.36
+            # HTTP_ACCEPT: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8
+            # HTTP_ACCEPT_ENCODING: gzip, deflate, br
+            # HTTP_ACCEPT_LANGUAGE: en-US,en;q=0.9
+            # HTTP_COOKIE: index=hello; index1=hello1
 
     def parse_input(self):
         pass
@@ -319,6 +334,14 @@ class HttpRequest:
     def accept_encoding(self):
         return self.environ['HTTP_ACCEPT_ENCODING']
 
+    @property
+    def session(self):
+        return {}
+
+    @property
+    def cookie(self):
+        return ''
+
 
 class HttpResponseBody:
 
@@ -326,21 +349,26 @@ class HttpResponseBody:
         return obj.__dict__.get('__body__', [])
 
     def __set__(self, obj, value):
-        if obj.use_gzip:
-            obj.__dict__['__body__'] = [gzip.compress(b''.join(value))]
-            obj.content_length = obj.__dict__['__body__']
-        else:
-            obj.__dict__['__body__'] = value
-            obj.content_length = sum(len(i) for i in value)
+        # if obj.use_gzip:
+        #     obj.__dict__['__body__'] = [gzip.compress(b''.join(value))]
+        #     obj.content_length = obj.__dict__['__body__']
+        # else:
+        #     obj.__dict__['__body__'] = value
+        #     obj.content_length = sum(len(i) for i in value)
+        if not isinstance(value, [list, tuple]):
+            value = [value]
+        obj.__dict__['__body__'] = value
+        obj.content_length = sum(len(i) for i in value)
 
 
 class HttpResponse:
 
     def __init__(self, use_gzip=False, content=None, code=200):
         self.code = code
-        self.header_dict = CaseInsensitiveDict(OrderedDict([('Content-Type', 'text/plain; charset=utf-8')]))
+        self.header_dict = CaseInsensitiveDict(OrderedDict([]))
         self.use_gzip = use_gzip
         self.content = HttpResponseBody()
+        self.cookie = OrderedDict()
 
     @property
     def status(self):
@@ -350,7 +378,10 @@ class HttpResponse:
     def headers(self):
         if self.use_gzip:
             self.add_header('Content-Encoding', 'gzip')
-        return [(key, str(value)) for key, value in self.header_dict.items()]
+        h = [(key, str(value)) for key, value in self.header_dict.items()]
+        for k in self.cookie:
+            h.append(('Set-Cookie', self.cookie[k]))
+        return h
 
     def add_header(self, name, value):
         self.header_dict[name.title()] = str(value)
@@ -365,11 +396,26 @@ class HttpResponse:
 
     @property
     def content_type(self):
-        return self.header_dict['Content-Type']
+        return self.header_dict.get('Content-Type')
 
     @content_type.setter
     def content_type(self, value):
         self.header_dict['Content-Type'] = value
+
+    def set_cookie(self, name, value, expires=None, max_age=60 * 60, path='/', domain=None, http_only=True, secure=False):
+        v = ['%s=%s' % (quote(name), quote(value))]
+        if not expires:
+            pass
+        if not max_age:
+            pass
+        v.append('Path=%s' % path)
+        if not domain:
+            pass
+        if http_only:
+            v.append('HttpOnly')
+        if not secure:
+            pass
+        self.cookie[name] = '; '.join(v)
 
 
 def make_response(*data, code=200):
@@ -381,8 +427,13 @@ def make_response(*data, code=200):
             content.append(item.encode('utf-8'))
         elif isinstance(item, bytes):
             content.append(item)
+        else:
+            raise TypeError('response content type error')
     if content:
         response.content = content
+    if not response.content_type:
+        # set default content-type
+        response.content_type = 'text/plain'
     response.code = code
     return response
 
@@ -521,6 +572,8 @@ if __name__ == '__main__':
 
     @app.get('/')
     def index():
+        ctx.response.set_cookie('index', 'hello')
+        ctx.response.set_cookie('index1', 'hello1')
         return 'hello'
 
     @app.get('/index/<name>/<username>')
