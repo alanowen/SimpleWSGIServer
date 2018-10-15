@@ -189,10 +189,31 @@ def get_response_status(code):
     return '%d %s' % (code, RESPONSE_STATUS[code])
 
 
+class RouteFilter:
+    pass
+
+
+class IntRouteFilter(RouteFilter):
+    pass
+
+
+class StrRouteFilter(RouteFilter):
+    pass
+
+
+class FloatRouteFilter(RouteFilter):
+    pass
+
+
+class RegexRouteFilter(RouteFilter):
+    pass
+
+
 class Router:
 
     def __init__(self):
         self.routes = [StaticRoute()]
+        self.route_filters = []
 
     def __call__(self, url_path, method):
         for route in self.routes:
@@ -451,6 +472,14 @@ class TemplateEngine:
         loader=PackageLoader('__main__', 'templates'),
         autoescape=select_autoescape(['html', 'xml'])
     )
+
+
+class WispyException(Exception):
+    pass
+
+
+class BuildRouteException(WispyException):
+    pass
 
 
 class Wispy:
