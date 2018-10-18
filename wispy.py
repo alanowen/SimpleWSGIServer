@@ -1,30 +1,29 @@
-# import io
 import os
 import re
 import abc
 import cgi
-# import sys
+import sys
 import uuid
 import gzip
-# import time
+import time
 import base64
-# import ctypes
-# import random
+import ctypes
+import random
 import doctest
 import inspect
-# import hashlib
+import hashlib
 import logging
-# import binascii
-# import datetime
+import binascii
+import datetime
 import mimetypes
 import functools
 from urllib.parse import quote, unquote
-# import importlib
-# import itertools
+import importlib
+import itertools
 import traceback
 from threading import local
 from wsgiref.simple_server import make_server
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 
@@ -102,23 +101,6 @@ RESPONSE_STATUS = {
 
 
 class CaseInsensitiveDict(dict):
-    '''
-    >>> data = {'key1': 'value1', 'key2': 'value2'}
-
-    >>> d = CaseInsensitiveDict(data)
-
-    >>> d['Key1']
-    'value1'
-
-    >>> d['key1']
-    'value1'
-
-    >>> d['key2']
-    'value2'
-
-    >>> d['Key2']
-    'value2'
-    '''
 
     def __init__(self, data):
         self.proxy = dict((key.lower(), key) for key in data)
@@ -204,37 +186,23 @@ def get_response_status(code):
     return '%d %s' % (code, RESPONSE_STATUS[code])
 
 
-class RouteFilter:
-    pass
-
-
-class IntRouteFilter(RouteFilter):
-    pass
-
-
-class StrRouteFilter(RouteFilter):
-    pass
-
-
-class FloatRouteFilter(RouteFilter):
-    pass
-
-
-class RegexRouteFilter(RouteFilter):
-    pass
-
-
 class Router:
 
-    def __init__(self, *routes):
-        self.routes = [r for r in routes]
+    def __init__(self):
+        self.routes = []
+        self.route_filter = {
+            'str': '[^\\/]+',
+            'int': '[-+]?[\d]+',
+            'float': '[-+]?\d*\.\d+|\d+'
+        }
+        self.param_pattern = re.compile('(<(?:(?:int:)|(?:str:)|(?:float:))?[a-zA-Z_]\w*>)')
 
     def __call__(self, url_path, method):
         for route in self.routes:
             matched = route.match(url_path)
             if matched[0]:
                 if route.method == method:
-                    if len(route.path_variables) > 0:
+                    if len(route.route_params) > 0:
                         result = route.callback(*matched[1])
                     else:
                         result = route.callback()
@@ -244,8 +212,40 @@ class Router:
         else:
             raise HttpNotFound()
 
-    def add_route(self, route):
+    def add_view_route(self, url_path, method, callback):
+        route_regex, route_params = self.build(url_path)
+        self.check_route_params(route_params, callback)
+        route = ViewRoute(url_path, method, callback, route_regex, route_params)
         self.routes.append(route)
+
+    # def add_static_route(self):
+    #     return re.compile('^/static/(?P<file_path>.+)$'), ['file_path']
+
+    def check_route_params(self, route_params, callback):
+        sig = inspect.signature(callback)
+        if len(route_params) != len(sig.parameters.keys()):
+            raise BuildRouteException('route parameters not matched')
+
+        for i in zip(route_params, sig.parameters):
+            if i[0] != i[1]:
+                raise BuildRouteException('route parameters not matched')
+
+    def build(self, url_path):
+        params = []
+        pattern = ['^']
+
+        for item in self.param_pattern.split(url_path):
+            if self.param_pattern.match(item):
+                if ':' not in item:
+                    item = '<str:' + item[1:]
+                param_type, param_name = item[1:-1].split(':')
+                params.append(param_name)
+                pattern.append('(?P<%s>%s)' % (param_name, self.route_filter[param_type]))
+            else:
+                if item != '':
+                    pattern.append(item)
+        pattern.append('$')
+        return re.compile(''.join(pattern)), params
 
 
 class Delegate:
@@ -274,85 +274,48 @@ class Delegate:
         return self
 
     def __isub__(self, callable_obj):
-        index = self.funcs.index(callable_obj)
-        print(index)
-        if index > 0:
-            self.funcs.pop(index)
+        i = self.funcs.index(callable_obj)
+        if i > 0:
+            self.funcs.pop(i)
         return self
 
 
-class Route(abc.ABC):
+class Route:
 
-    def __init__(self, url_path, method, callback):
+    def __init__(self, url_path, method, callback, route_regex, route_params):
+        self.url_path = url_path
         self.method = method
         self.callback = callback
-        self.path_pattern, self.path_variables = self.build_path(url_path)
-        self.check_route_params(self.path_variables)
-
-    @abc.abstractmethod
-    def build_path(self):
-        pass
+        self.route_regex = route_regex
+        self.route_params = route_params
 
     def match(self, url_path):
-        m = self.path_pattern.match(url_path)
+        m = self.route_regex.match(url_path)
         if m:
             return True, m.groups()
         else:
-            return (False,)
-
-    def check_route_params(self, variables):
-        sig = inspect.signature(self.callback)
-        if len(variables) != len(sig.parameters.keys()):
-            raise BuildRouteException('route parameters not matched')
-
-        for i in zip(variables, sig.parameters):
-            if i[0] != i[1]:
-                raise BuildRouteException('route parameters not matched')
+            return False,
 
     def __repr__(self):
-        return '<%s %s>' % (self.__class__.__name__, self.path_pattern)
+        return '<%s %s>' % (self.__class__.__name__, self.route_regex)
 
 
 class ViewRoute(Route):
 
-    def __init__(self, url_path, method, callback):
-        super(ViewRoute, self).__init__(url_path, method, callback)
+    def __init__(self, url_path, method, callback, route_regex, route_params):
+        super(ViewRoute, self).__init__(url_path, method, callback, route_regex, route_params)
 
-    def build_path(self, url_path):
-        '''
-        # /path/path2/path3/<num1>
-        # ^/path/path2/path3/(?P<num1>[^\\/]+)$
-
-        # /path/<num1>/path3/<num2>
-        # ^/path/(?P<num1>[^\\/]+)/path3/(?P<num2>[^\\/]+)$
-
-        # /path/<num1>/path3/<num2>
-        '''
-        # buf = ctypes.create_unicode_buffer(url_path)
-        r = re.compile(r'(<[a-zA-Z_]\w*>)')
-
-        path_variables = []
-        path_components = ['^']
-
-        for item in r.split(url_path):
-            if r.match(item):
-                path_variables.append(item[1:-1])
-                path_components.append(r'(?P<%s>[^\\/]+)' % item[1:-2])
-            else:
-                if item != '':
-                    path_components.append(item)
-        path_components.append('$')
-
-        return re.compile(''.join(path_components)), path_variables
+    def __repr__(self):
+        return '<%s %s>' % (self.__class__.__name__, self.route_regex)
 
 
 class StaticRoute(Route):
 
-    def __init__(self):
-        super(StaticRoute, self).__init__(None, 'GET', send_static_file)
+    def __init__(self, url_path, method, callback, route_regex, route_params):
+        super(StaticRoute, self).__init__(url_path, method, callback, route_regex, route_params)
 
-    def build_path(self, url_path):
-        return re.compile(r'^/static/(?P<file_path>.+)$'), ['file_path']
+    def build(self, url_path):
+        return re.compile('^/static/(?P<file_path>.+)$'), ['file_path']
 
 
 def send_static_file(file_path):
@@ -553,37 +516,33 @@ class Wispy:
         self.before_interceptors = []
         self.after_interceptors = []
 
-        self.router = Router(StaticRoute())
+        self.router = Router()
 
-        self.templage_engine = Environment(
+        self.template_engine = Environment(
                 loader=PackageLoader('__main__', 'templates'),
                 autoescape=select_autoescape(['html', 'xml']))
 
     def get(self, url_path):
         def decorated(callback):
-            route = ViewRoute(url_path, 'GET', callback)
-            self.router.add_route(route)
+            self.router.add_view_route(url_path, 'GET', callback)
             return callback
         return decorated
 
     def post(self, url_path):
         def decorated(callback):
-            route = ViewRoute(url_path, 'POST', callback)
-            self.router.add_route(route)
+            self.router.add_view_route(url_path, 'POST', callback)
             return callback
         return decorated
 
     def options(self, url_path):
         def decorated(callback):
-            route = ViewRoute(url_path, 'OPTIONS', callback)
-            self.router.add_route(route)
+            self.router.add_view_route(url_path, 'OPTIONS', callback)
             return callback
         return decorated
 
     def head(self, url_path):
         def decorated(callback):
-            route = ViewRoute(url_path, 'HEAD', callback)
-            self.router.add_route(route)
+            self.router.add_view_route(url_path, 'HEAD', callback)
             return callback
         return decorated
 
@@ -592,7 +551,7 @@ class Wispy:
             @functools.wraps(callback)
             def decorated(*args, **kwargs):
                 ctx.response.content_type = 'text/html'
-                template = self.templage_engine.get_template(template_name)
+                template = self.template_engine.get_template(template_name)
                 return template.render(**callback(*args, **kwargs))
             return decorated
         return wrapper
@@ -672,9 +631,9 @@ if __name__ == '__main__':
     def home():
         return url_redirect(302, 'http://www.baidu.com')
 
-    # @app.get('/user/<int:id>')
-    # def user(id):
-    #     pass
+    @app.get('/user/<int:id>')
+    def user(id):
+        return str(type(id))
 
     doctest.testmod()
 
