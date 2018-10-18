@@ -32,6 +32,22 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 ctx = local()
 
 
+def to_bytes(s):
+    return s.encode('utf-8')
+
+
+def to_str(b):
+    return b.decode('ascii')
+
+
+def read_file(file_path, buff_size=8192):
+    with open(file_path, 'rb') as f:
+        chunk = f.read(buff_size)
+        while chunk:
+            yield chunk
+            chunk = f.read(buff_size)
+
+
 RESPONSE_STATUS = {
     # 100 ~ 199 Info status
     100: 'Continue',
@@ -86,7 +102,7 @@ RESPONSE_STATUS = {
 
 
 class CaseInsensitiveDict(dict):
-    """
+    '''
     >>> data = {'key1': 'value1', 'key2': 'value2'}
 
     >>> d = CaseInsensitiveDict(data)
@@ -102,7 +118,7 @@ class CaseInsensitiveDict(dict):
 
     >>> d['Key2']
     'value2'
-    """
+    '''
 
     def __init__(self, data):
         self.proxy = dict((key.lower(), key) for key in data)
@@ -133,14 +149,11 @@ class HttpError(Exception):
     def __init__(self, code):
         super(Exception, self).__init__()
         self.code = code
+        self.headers = []
 
     @property
     def status(self):
         return get_response_status(self.code)
-
-    @property
-    def headers(self):
-        return []
 
     def __repr__(self):
         return self.status
@@ -181,8 +194,10 @@ class HttpMethodNotAllowed(HttpError):
 
 class HttpRedirect(HttpError):
 
-    def location(self, url):
-        pass
+    def __init__(self, code, location):
+        super(HttpRedirect, self).__init__(code)
+        self.location = location
+        self.headers = [('Location', location)]
 
 
 def get_response_status(code):
@@ -211,9 +226,8 @@ class RegexRouteFilter(RouteFilter):
 
 class Router:
 
-    def __init__(self):
-        self.routes = [StaticRoute()]
-        self.route_filters = []
+    def __init__(self, *routes):
+        self.routes = [r for r in routes]
 
     def __call__(self, url_path, method):
         for route in self.routes:
@@ -221,9 +235,9 @@ class Router:
             if matched[0]:
                 if route.method == method:
                     if len(route.path_variables) > 0:
-                        result = route.func(*matched[1])
+                        result = route.callback(*matched[1])
                     else:
-                        result = route.func()
+                        result = route.callback()
                     return make_response(result)
                 else:
                     raise HttpMethodNotAllowed()
@@ -234,44 +248,87 @@ class Router:
         self.routes.append(route)
 
 
-class Route(metaclass=abc.ABCMeta):
+class Delegate:
+
+    def __init__(self, callable_obj=None):
+        if callable_obj and callable(callable_obj):
+            raise ValueError('%s is not callable' % callable_obj.__name__)
+        self.funcs = [callable_obj] if callable_obj else []
+
+    def __get__(self, obj, cls):
+        return self
+
+    def __set__(self, obj, callable_obj):
+        if callable_obj is not self:
+            if not callable(callable_obj):
+                raise ValueError('%s is not callable' % callable_obj.__name__)
+            else:
+                self.funcs = [callable_obj]
+
+    def __call__(self):
+        for callable_obj in self.funcs:
+            return callable_obj()
+
+    def __iadd__(self, callable_obj):
+        self.funcs.append(callable_obj)
+        return self
+
+    def __isub__(self, callable_obj):
+        index = self.funcs.index(callable_obj)
+        print(index)
+        if index > 0:
+            self.funcs.pop(index)
+        return self
+
+
+class Route(abc.ABC):
+
+    def __init__(self, url_path, method, callback):
+        self.method = method
+        self.callback = callback
+        self.path_pattern, self.path_variables = self.build_path(url_path)
+        self.check_route_params(self.path_variables)
+
+    @abc.abstractmethod
+    def build_path(self):
+        pass
 
     def match(self, url_path):
-        m = self.path_regex.match(url_path)
+        m = self.path_pattern.match(url_path)
         if m:
             return True, m.groups()
         else:
             return (False,)
 
     def check_route_params(self, variables):
-        sig = inspect.signature(self.func)
-        assert len(variables) == len(sig.parameters.keys()), 'route parameters not matched'
+        sig = inspect.signature(self.callback)
+        if len(variables) != len(sig.parameters.keys()):
+            raise BuildRouteException('route parameters not matched')
 
         for i in zip(variables, sig.parameters):
-            assert i[0] == i[1], 'route parameters not matched'
+            if i[0] != i[1]:
+                raise BuildRouteException('route parameters not matched')
 
     def __repr__(self):
-        return '<%s %s>' % (self.__class__.__name__, self.path_regex)
+        return '<%s %s>' % (self.__class__.__name__, self.path_pattern)
 
 
 class ViewRoute(Route):
 
-    def __init__(self, url_path, method, func):
-        self.method = method
-        self.func = func
-        self.path_regex, self.path_variables = self.build_path_components(url_path)
+    def __init__(self, url_path, method, callback):
+        super(ViewRoute, self).__init__(url_path, method, callback)
 
-        self.check_route_params(self.path_variables)
-
-    def build_path_components(self, url_path):
-        """
+    def build_path(self, url_path):
+        '''
         # /path/path2/path3/<num1>
         # ^/path/path2/path3/(?P<num1>[^\\/]+)$
 
         # /path/<num1>/path3/<num2>
         # ^/path/(?P<num1>[^\\/]+)/path3/(?P<num2>[^\\/]+)$
+
+        # /path/<num1>/path3/<num2>
+        '''
         # buf = ctypes.create_unicode_buffer(url_path)
-        """
         r = re.compile(r'(<[a-zA-Z_]\w*>)')
 
         path_variables = []
@@ -292,28 +349,22 @@ class ViewRoute(Route):
 class StaticRoute(Route):
 
     def __init__(self):
-        self.path_regex = re.compile(r'^/static/(?P<file_path>.+)$')
-        self.path_variables = ['file_path']
-        self.method = 'GET'
-        self.check_route_params(self.path_variables)
+        super(StaticRoute, self).__init__(None, 'GET', send_static_file)
 
-    def func(self, file_path):
-        def read_file(path, buff_size=8192):
-            with open(path, 'rb') as f:
-                chunk = f.read(buff_size)
-                while chunk:
-                    yield chunk
-                    chunk = f.read(buff_size)
+    def build_path(self, url_path):
+        return re.compile(r'^/static/(?P<file_path>.+)$'), ['file_path']
 
-        file_path = os.path.join(ctx.current_app.static_path, file_path)
 
-        if not os.path.exists(file_path):
-            raise HttpNotFound()
+def send_static_file(file_path):
+    file_path = os.path.join(ctx.current_app.static_path, file_path)
 
-        file_ext = os.path.splitext(file_path)[1]
+    if not os.path.exists(file_path):
+        raise HttpNotFound()
 
-        ctx.response.content_type = mimetypes.types_map.get(file_ext, 'application/octet-stream')
-        return b''.join(read_file(file_path))
+    file_ext = os.path.splitext(file_path)[1]
+
+    ctx.response.content_type = mimetypes.types_map.get(file_ext, 'application/octet-stream')
+    return b''.join(read_file(file_path))
 
 
 class HttpRequest:
@@ -322,9 +373,9 @@ class HttpRequest:
         self.environ = environ
         # get form data
         form = cgi.FieldStorage(fp=self.environ['wsgi.input'], environ=self.environ, keep_blank_values=True)
-        for i in environ:
-            print('%s: %s' % (i, environ[i]))
-            CONTENT_TYPE: text/plain
+        # for i in environ:
+            # print('%s: %s' % (i, environ[i]))
+            # CONTENT_TYPE: text/plain
             # HTTP_HOST: 127.0.0.1:8080
             # HTTP_CONNECTION: keep-alive
             # HTTP_PRAGMA: no-cache
@@ -445,7 +496,7 @@ def make_response(*data, code=200):
 
     for item in data:
         if isinstance(item, str):
-            content.append(item.encode('utf-8'))
+            content.append(to_bytes(item))
         elif isinstance(item, bytes):
             content.append(item)
         else:
@@ -459,7 +510,11 @@ def make_response(*data, code=200):
     return response
 
 
-def redirect():
+def url_redirect(code, location):
+    raise HttpRedirect(code, location)
+
+
+def url_for():
     pass
 
 
@@ -498,57 +553,57 @@ class Wispy:
         self.before_interceptors = []
         self.after_interceptors = []
 
-        self.router = Router()
+        self.router = Router(StaticRoute())
 
         self.templage_engine = Environment(
                 loader=PackageLoader('__main__', 'templates'),
                 autoescape=select_autoescape(['html', 'xml']))
 
     def get(self, url_path):
-        def decorated(func):
-            route = ViewRoute(url_path, 'GET', func)
+        def decorated(callback):
+            route = ViewRoute(url_path, 'GET', callback)
             self.router.add_route(route)
-            return func
+            return callback
         return decorated
 
     def post(self, url_path):
-        def decorated(func):
-            route = ViewRoute(url_path, 'POST', func)
+        def decorated(callback):
+            route = ViewRoute(url_path, 'POST', callback)
             self.router.add_route(route)
-            return func
+            return callback
         return decorated
 
     def options(self, url_path):
-        def decorated(func):
-            route = ViewRoute(url_path, 'OPTIONS', func)
+        def decorated(callback):
+            route = ViewRoute(url_path, 'OPTIONS', callback)
             self.router.add_route(route)
-            return func
+            return callback
         return decorated
 
     def head(self, url_path):
-        def decorated(func):
-            route = ViewRoute(url_path, 'HEAD', func)
+        def decorated(callback):
+            route = ViewRoute(url_path, 'HEAD', callback)
             self.router.add_route(route)
-            return func
+            return callback
         return decorated
 
     def view(self, template_name):
-        def wrapper(func):
-            @functools.wraps(func)
+        def wrapper(callback):
+            @functools.wraps(callback)
             def decorated(*args, **kwargs):
                 ctx.response.content_type = 'text/html'
                 template = self.templage_engine.get_template(template_name)
-                return template.render(**func(*args, **kwargs))
+                return template.render(**callback(*args, **kwargs))
             return decorated
         return wrapper
 
-    def before_request(self, func):
-        self.before_interceptors.append(func)
-        return func
+    def before_request(self, callback):
+        self.before_interceptors.append(callback)
+        return callback
 
-    def after_request(self, func):
-        self.after_interceptors.append(func)
-        return func
+    def after_request(self, callback):
+        self.after_interceptors.append(callback)
+        return callback
 
     def run(self, host, port, debug=False):
 
@@ -578,9 +633,12 @@ class Wispy:
 
             # return end_response(response)
             return ctx.response.content
+        except HttpRedirect as e:
+            start_response(e.status, e.headers)
+            return []
         except HttpError as e:
             start_response(e.status, e.headers)
-            return [e.status.encode('utf-8')]
+            return [to_bytes(e.status)]
         except Exception as e:
             if getattr(self, 'debug', False) is True:
                 traceback.print_exc()
@@ -588,7 +646,7 @@ class Wispy:
                 logging.exception(e)
             status = get_response_status(500)
             start_response(status, [])
-            return [status.encode('utf-8')]
+            return [to_bytes(status)]
         finally:
             del ctx.request
             del ctx.response
@@ -612,7 +670,11 @@ if __name__ == '__main__':
 
     @app.get('/home')
     def home():
-        return make_response('home')
+        return url_redirect(302, 'http://www.baidu.com')
+
+    # @app.get('/user/<int:id>')
+    # def user(id):
+    #     pass
 
     doctest.testmod()
 
