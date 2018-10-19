@@ -13,6 +13,7 @@ import doctest
 import inspect
 import hashlib
 import logging
+import builtins
 import binascii
 import datetime
 import mimetypes
@@ -29,22 +30,6 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 
 
 ctx = local()
-
-
-def to_bytes(s):
-    return s.encode('utf-8')
-
-
-def to_str(b):
-    return b.decode('ascii')
-
-
-def read_file(file_path, buff_size=8192):
-    with open(file_path, 'rb') as f:
-        chunk = f.read(buff_size)
-        while chunk:
-            yield chunk
-            chunk = f.read(buff_size)
 
 
 RESPONSE_STATUS = {
@@ -98,6 +83,26 @@ RESPONSE_STATUS = {
     504: 'Gateway Timeout',
     505: 'HTTP Version Not Supported'
 }
+
+
+def to_bytes(s):
+    return s.encode('utf-8')
+
+
+def to_str(b):
+    return b.decode('ascii')
+
+
+def read_file(file_path, buff_size=8192):
+    with open(file_path, 'rb') as f:
+        chunk = f.read(buff_size)
+        while chunk:
+            yield chunk
+            chunk = f.read(buff_size)
+
+
+class UTC:
+    pass
 
 
 class CaseInsensitiveDict(dict):
@@ -186,68 +191,6 @@ def get_response_status(code):
     return '%d %s' % (code, RESPONSE_STATUS[code])
 
 
-class Router:
-
-    def __init__(self):
-        self.routes = []
-        self.route_filter = {
-            'str': '[^\\/]+',
-            'int': '[-+]?[\d]+',
-            'float': '[-+]?\d*\.\d+|\d+'
-        }
-        self.param_pattern = re.compile('(<(?:(?:int:)|(?:str:)|(?:float:))?[a-zA-Z_]\w*>)')
-
-    def __call__(self, url_path, method):
-        for route in self.routes:
-            matched = route.match(url_path)
-            if matched[0]:
-                if route.method == method:
-                    if len(route.route_params) > 0:
-                        result = route.callback(*matched[1])
-                    else:
-                        result = route.callback()
-                    return make_response(result)
-                else:
-                    raise HttpMethodNotAllowed()
-        else:
-            raise HttpNotFound()
-
-    def add_view_route(self, url_path, method, callback):
-        route_regex, route_params = self.build(url_path)
-        self.check_route_params(route_params, callback)
-        route = ViewRoute(url_path, method, callback, route_regex, route_params)
-        self.routes.append(route)
-
-    # def add_static_route(self):
-    #     return re.compile('^/static/(?P<file_path>.+)$'), ['file_path']
-
-    def check_route_params(self, route_params, callback):
-        sig = inspect.signature(callback)
-        if len(route_params) != len(sig.parameters.keys()):
-            raise BuildRouteException('route parameters not matched')
-
-        for i in zip(route_params, sig.parameters):
-            if i[0] != i[1]:
-                raise BuildRouteException('route parameters not matched')
-
-    def build(self, url_path):
-        params = []
-        pattern = ['^']
-
-        for item in self.param_pattern.split(url_path):
-            if self.param_pattern.match(item):
-                if ':' not in item:
-                    item = '<str:' + item[1:]
-                param_type, param_name = item[1:-1].split(':')
-                params.append(param_name)
-                pattern.append('(?P<%s>%s)' % (param_name, self.route_filter[param_type]))
-            else:
-                if item != '':
-                    pattern.append(item)
-        pattern.append('$')
-        return re.compile(''.join(pattern)), params
-
-
 class Delegate:
 
     def __init__(self, callable_obj=None):
@@ -280,21 +223,108 @@ class Delegate:
         return self
 
 
+class RouteParameter(namedtuple('RouteParameter', ['name', 'type', 'value'])):
+
+    __slots__ = ()
+
+    def replace_value(self, value):
+        return self._replace(value=value)
+
+    def __repr__(self):
+        return '<RouteParameter %s %s %s>' % (self.name, str(self.value), self.type)
+
+    def convert_value(self):
+        return getattr(builtins, self.type)(self.value)
+
+
+# set default value
+RouteParameter.__new__.__defaults__ = (None, ) * len(RouteParameter._fields)
+
+
+class Router:
+
+    def __init__(self):
+        self.routes = []
+        self.route_filter = {
+            'str': '[^\\/]+',
+            'int': '[-+]?[\d]+',
+            'float': '[-+]?\d*\.\d+|\d+'
+        }
+        self.param_pattern = re.compile('(<(?:(?:int:)|(?:str:)|(?:float:))?[a-zA-Z_]\w*>)')
+
+    def __call__(self, url_path, method):
+        for route in self.routes:
+            matched = route.match(url_path)
+            if matched:
+                if route.method == method:
+                    if len(route.route_param_dict) > 0:
+                        result = route.callback(**route.get_converted_value_dict())
+                    else:
+                        result = route.callback()
+                    return make_response(result)
+                else:
+                    raise HttpMethodNotAllowed()
+        else:
+            raise HttpNotFound()
+
+    def add_view_route(self, url_path, method, callback):
+        route_regex, route_param_dict = self.build(url_path)
+        self.check_route_params(route_param_dict, callback)
+        route = ViewRoute(url_path, method, callback, route_regex, route_param_dict)
+        self.routes.append(route)
+
+    def check_route_params(self, route_param_dict, callback):
+        # get signature obj of the callback obj
+        sig = inspect.signature(callback)
+        if route_param_dict.keys() != sig.parameters.keys():
+            raise BuildRouteException('route parameters not matched')
+
+    def build(self, url_path):
+        param_dict = OrderedDict()
+        pattern = ['^']
+
+        for item in self.param_pattern.split(url_path):
+            if self.param_pattern.match(item):
+                if ':' not in item:
+                    item = '<str:' + item[1:]
+                v_type, v_name = item[1:-1].split(':')
+                param = RouteParameter(name=v_name, type=v_type, value=None)
+                param_dict[v_name] = param
+                pattern.append('(?P<%s>%s)' % (param.name, self.route_filter[param.type]))
+            else:
+                if item != '':
+                    pattern.append(item)
+        pattern.append('$')
+        return re.compile(''.join(pattern)), param_dict
+
+
 class Route:
 
-    def __init__(self, url_path, method, callback, route_regex, route_params):
+    def __init__(self, url_path, method, callback, route_regex, route_param_dict):
         self.url_path = url_path
         self.method = method
         self.callback = callback
         self.route_regex = route_regex
-        self.route_params = route_params
+        self.route_param_dict = route_param_dict
 
     def match(self, url_path):
         m = self.route_regex.match(url_path)
         if m:
-            return True, m.groups()
+            # set value to route param according route param type
+            value_dict = m.groupdict()
+
+            for name, param_obj in self.route_param_dict.items():
+                value = value_dict[name]
+                self.route_param_dict[name] = param_obj.replace_value(value)
+            return True
         else:
-            return False,
+            return False
+
+    def get_converted_value_dict(self):
+        return {name: obj.convert_value() for name, obj in self.route_param_dict.items()}
+
+    def get_raw_value_dict(self):
+        return {name: obj.value for name, obj in self.route_param_dict.item()}
 
     def __repr__(self):
         return '<%s %s>' % (self.__class__.__name__, self.route_regex)
@@ -302,17 +332,14 @@ class Route:
 
 class ViewRoute(Route):
 
-    def __init__(self, url_path, method, callback, route_regex, route_params):
-        super(ViewRoute, self).__init__(url_path, method, callback, route_regex, route_params)
-
-    def __repr__(self):
-        return '<%s %s>' % (self.__class__.__name__, self.route_regex)
+    def __init__(self, url_path, method, callback, route_regex, route_param_dict):
+        super(ViewRoute, self).__init__(url_path, method, callback, route_regex, route_param_dict)
 
 
 class StaticRoute(Route):
 
-    def __init__(self, url_path, method, callback, route_regex, route_params):
-        super(StaticRoute, self).__init__(url_path, method, callback, route_regex, route_params)
+    def __init__(self, url_path, method, callback, route_regex, route_param_dict):
+        super(StaticRoute, self).__init__(url_path, method, callback, route_regex, route_param_dict)
 
     def build(self, url_path):
         return re.compile('^/static/(?P<file_path>.+)$'), ['file_path']
@@ -454,18 +481,19 @@ class HttpResponse:
 
 
 def make_response(*data, code=200):
-    content = []
+    contents = []
     response = ctx.response
 
-    for item in data:
-        if isinstance(item, str):
-            content.append(to_bytes(item))
-        elif isinstance(item, bytes):
-            content.append(item)
+    for d in data:
+        if isinstance(d, str):
+            contents.append(to_bytes(d))
+        elif isinstance(d, bytes):
+            contents.append(d)
         else:
             raise TypeError('response content type error')
-    if content:
-        response.content = content
+
+    if contents:
+        response.content = contents
     if not response.content_type:
         # set default content-type
         response.content_type = 'text/plain'
@@ -633,6 +661,10 @@ if __name__ == '__main__':
 
     @app.get('/user/<int:id>')
     def user(id):
+        return str(type(id))
+
+    @app.get('/user1/<float:id>')
+    def test_fload(id):
         return str(type(id))
 
     doctest.testmod()
