@@ -1,4 +1,4 @@
-import os
+from os import path as os_path
 import re
 import abc
 import cgi
@@ -18,7 +18,7 @@ import binascii
 import datetime
 import mimetypes
 import functools
-from urllib.parse import quote, unquote
+from urllib.parse import quote as url_quote, unquote as url_unquote
 import importlib
 import itertools
 import traceback
@@ -28,9 +28,7 @@ from collections import OrderedDict, namedtuple
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 
-
 ctx = local()
-
 
 RESPONSE_STATUS = {
     # 100 ~ 199 Info status
@@ -194,9 +192,10 @@ def get_response_status(code):
 class Delegate:
 
     def __init__(self, callable_obj=None):
-        if callable_obj and callable(callable_obj):
+        if not callable(callable_obj):
             raise ValueError('%s is not callable' % callable_obj.__name__)
         self.funcs = [callable_obj] if callable_obj else []
+        self.result = []
 
     def __get__(self, obj, cls):
         return self
@@ -210,7 +209,8 @@ class Delegate:
 
     def __call__(self):
         for callable_obj in self.funcs:
-            return callable_obj()
+            self.result.append(callable_obj())
+        return self.result
 
     def __iadd__(self, callable_obj):
         self.funcs.append(callable_obj)
@@ -224,7 +224,6 @@ class Delegate:
 
 
 class RouteParameter(namedtuple('RouteParameter', ['name', 'type', 'value'])):
-
     __slots__ = ()
 
     def replace_value(self, value):
@@ -237,8 +236,8 @@ class RouteParameter(namedtuple('RouteParameter', ['name', 'type', 'value'])):
         return getattr(builtins, self.type)(self.value)
 
 
-# set default value
-RouteParameter.__new__.__defaults__ = (None, ) * len(RouteParameter._fields)
+# make None as default value to RouteParameter
+RouteParameter.__new__.__defaults__ = (None,) * len(RouteParameter._fields)
 
 
 class Router:
@@ -277,7 +276,7 @@ class Router:
         # get signature obj of the callback obj
         sig = inspect.signature(callback)
         if route_param_dict.keys() != sig.parameters.keys():
-            raise BuildRouteException('route parameters not matched')
+            raise RouteBuildException('route parameters not matched')
 
     def build(self, url_path):
         param_dict = OrderedDict()
@@ -346,15 +345,301 @@ class StaticRoute(Route):
 
 
 def send_static_file(file_path):
-    file_path = os.path.join(ctx.current_app.static_path, file_path)
+    file_path = os_path.join(ctx.current_app.static_path, file_path)
 
-    if not os.path.exists(file_path):
+    if not os_path.exists(file_path):
         raise HttpNotFound()
 
-    file_ext = os.path.splitext(file_path)[1]
+    file_ext = os_path.splitext(file_path)[1]
 
     ctx.response.content_type = mimetypes.types_map.get(file_ext, 'application/octet-stream')
     return b''.join(read_file(file_path))
+
+
+class HeaderDescriptor:
+    """
+    http header descriptor
+    """
+
+    def __init__(self, readonly=False, as_interface=False):
+        self.readonly = readonly
+        self.as_interface = as_interface
+
+    def __get__(self, obj, cls):
+        name = self.func.__name__.strip('_').upper()
+        if isinstance(obj.injected, HttpRequest):
+            return obj.injected.__dict__ \
+                .setdefault('__headers__', {}) \
+                .setdefault(name, obj.injected.environ.get('HTTP_%s' % name))
+        elif isinstance(obj.injected, HttpResponse):
+            if self.as_interface:
+                return obj.injected.__dict__ \
+                    .setdefault('__headers__', {}) \
+                    .setdefault(name, obj.injected.environ.get('HTTP_%s' % name))
+            else:
+                return obj.injected.__dict__ \
+                    .setdefault('__headers__', {}) \
+                    .setdefault(name, obj.injected.environ.get('HTTP_%s' % name))
+        else:
+            raise TypeError('The type of object injected into HeaderDescriptor should be HttpResponse or HttpRequest.')
+
+    def __set__(self, obj, value):
+        if self.readonly:
+            raise AttributeError('The %s is readonly' % self.__name__)
+
+    def __call__(self, func):
+        """
+        This function is only used for wrapping function, it should not be called directly.
+        :param func:
+        :return:
+        """
+        self.func = func
+        return self
+
+
+class HttpGeneralHeaders:
+    """
+    http general headers
+    """
+
+    @HeaderDescriptor()
+    def cache_control(self):
+        pass
+
+    @HeaderDescriptor()
+    def content(self):
+        pass
+
+    @HeaderDescriptor()
+    def _date(self):
+        pass
+
+    @HeaderDescriptor()
+    def pragma(self):
+        pass
+
+    @HeaderDescriptor()
+    def trailer(self):
+        pass
+
+    @HeaderDescriptor()
+    def transfer_encoding(self):
+        pass
+
+    @HeaderDescriptor()
+    def upgrade(self):
+        pass
+
+    @HeaderDescriptor()
+    def via(self):
+        pass
+
+    @HeaderDescriptor()
+    def warning(self):
+        pass
+
+
+class HttpEntityHeaders:
+
+    @HeaderDescriptor()
+    def allow(self):
+        pass
+
+    @HeaderDescriptor()
+    def content_encoding(self):
+        pass
+
+    @HeaderDescriptor()
+    def content_language(self):
+        pass
+
+    @HeaderDescriptor()
+    def content_length(self):
+        pass
+
+    @HeaderDescriptor()
+    def content_location(self):
+        pass
+
+    @HeaderDescriptor()
+    def content_md5(self):
+        pass
+
+    @HeaderDescriptor()
+    def content_range(self):
+        pass
+
+    @HeaderDescriptor()
+    def content_type(self):
+        pass
+
+    @HeaderDescriptor()
+    def expires(self):
+        pass
+
+    @HeaderDescriptor()
+    def last_modified(self):
+        pass
+
+
+class HttpCookieHeaders:
+
+    @HeaderDescriptor()
+    def set_cookie(self):
+        pass
+
+    @HeaderDescriptor()
+    def cookie(self):
+        pass
+
+
+class OtherHttpHeaders:
+    pass
+
+
+class HttpResponseHeaders(HttpGeneralHeaders):
+    """
+    http response headers
+    """
+
+    def __init__(self, injected):
+        self.injected = injected
+
+    # for i in environ:
+    # print('%s: %s' % (i, environ[i]))
+    # CONTENT_TYPE: text/plain
+    # HTTP_HOST: 127.0.0.1:8080
+    # HTTP_CONNECTION: keep-alive
+    # HTTP_PRAGMA: no-cache
+    # HTTP_CACHE_CONTROL: no-cache
+    # HTTP_UPGRADE_INSECURE_REQUESTS: 1
+    # HTTP_USER_AGENT: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) snap Chromium/69.0.3497.100 Chrome/69.0.3497.100 Safari/537.36
+    # HTTP_ACCEPT: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8
+    # HTTP_ACCEPT_ENCODING: gzip, deflate, br
+    # HTTP_ACCEPT_LANGUAGE: en-US,en;q=0.9
+    # HTTP_COOKIE: index=hello; index1=hello1
+
+    @HeaderDescriptor()
+    def accept_ranges(self):
+        pass
+
+    @HeaderDescriptor()
+    def age(self):
+        pass
+
+    @HeaderDescriptor()
+    def etag(self):
+        pass
+
+    @HeaderDescriptor()
+    def location(self):
+        pass
+
+    @HeaderDescriptor()
+    def proxy_authenticate(self):
+        pass
+
+    @HeaderDescriptor()
+    def retry_after(self):
+        pass
+
+    @HeaderDescriptor()
+    def server(self):
+        pass
+
+    @HeaderDescriptor()
+    def vary(self):
+        pass
+
+    @HeaderDescriptor()
+    def www_authenticate(self):
+        pass
+
+
+class HttpRequestHeaders(HttpGeneralHeaders):
+    """
+    http request headers
+    """
+    _HeaderDescriptor = functools.partial(HeaderDescriptor, readonly=True)
+
+    def __init__(self, injected):
+        self.injected = injected
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def accept(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def accept_charset(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def accept_encoding(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def accept_language(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def authorization(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def expect(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def _from(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def host(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def if_match(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def if_modified_since(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def if_none_match(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def if_range(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def if_unmodified_since(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def max_forwards(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def proxy_authorization(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def range(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def referer(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def te(self):
+        pass
+
+    @HeaderDescriptor(readonly=True, as_interface=True)
+    def user_agent(self):
+        pass
 
 
 class HttpRequest:
@@ -362,47 +647,23 @@ class HttpRequest:
     def __init__(self, environ):
         self.environ = environ
         # get form data
-        form = cgi.FieldStorage(fp=self.environ['wsgi.input'], environ=self.environ, keep_blank_values=True)
-        # for i in environ:
-            # print('%s: %s' % (i, environ[i]))
-            # CONTENT_TYPE: text/plain
-            # HTTP_HOST: 127.0.0.1:8080
-            # HTTP_CONNECTION: keep-alive
-            # HTTP_PRAGMA: no-cache
-            # HTTP_CACHE_CONTROL: no-cache
-            # HTTP_UPGRADE_INSECURE_REQUESTS: 1
-            # HTTP_USER_AGENT: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) snap Chromium/69.0.3497.100 Chrome/69.0.3497.100 Safari/537.36
-            # HTTP_ACCEPT: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8
-            # HTTP_ACCEPT_ENCODING: gzip, deflate, br
-            # HTTP_ACCEPT_LANGUAGE: en-US,en;q=0.9
-            # HTTP_COOKIE: index=hello; index1=hello1
-
-    def parse_input(self):
-        pass
+        # self.form = cgi.FieldStorage(fp=self.environ['wsgi.input'], environ=self.environ, keep_blank_values=True)
+        self.headers = HttpRequestHeaders(self)
 
     @property
     def request_method(self):
         return self.environ['REQUEST_METHOD']
 
     @property
-    def headers(self):
-        pass
-
-    @property
     def path_info(self):
-        return self.environ['PATH_INFO']
-
-    @property
-    def accept_encoding(self):
-        return self.environ['HTTP_ACCEPT_ENCODING']
+        return url_unquote(self.environ['PATH_INFO'])
 
     @property
     def session(self):
         return {}
 
-    @property
-    def cookie(self):
-        return ''
+    def parse_input(self):
+        pass
 
 
 class HttpResponseBody:
@@ -411,13 +672,7 @@ class HttpResponseBody:
         return obj.__dict__.get('__body__', [])
 
     def __set__(self, obj, value):
-        # if obj.use_gzip:
-        #     obj.__dict__['__body__'] = [gzip.compress(b''.join(value))]
-        #     obj.content_length = obj.__dict__['__body__']
-        # else:
-        #     obj.__dict__['__body__'] = value
-        #     obj.content_length = sum(len(i) for i in value)
-        if not isinstance(value, [list, tuple]):
+        if not isinstance(value, (list, tuple)):
             value = [value]
         obj.__dict__['__body__'] = value
         obj.content_length = sum(len(i) for i in value)
@@ -425,25 +680,16 @@ class HttpResponseBody:
 
 class HttpResponse:
 
-    def __init__(self, use_gzip=False, content=None, code=200):
+    def __init__(self, code=200):
         self.code = code
         self.header_dict = CaseInsensitiveDict(OrderedDict([]))
-        self.use_gzip = use_gzip
         self.content = HttpResponseBody()
         self.cookie = OrderedDict()
+        self.headers = HttpResponseHeaders(self)
 
     @property
     def status(self):
         return get_response_status(self.code)
-
-    @property
-    def headers(self):
-        if self.use_gzip:
-            self.add_header('Content-Encoding', 'gzip')
-        h = [(key, str(value)) for key, value in self.header_dict.items()]
-        for k in self.cookie:
-            h.append(('Set-Cookie', self.cookie[k]))
-        return h
 
     def add_header(self, name, value):
         self.header_dict[name.title()] = str(value)
@@ -464,8 +710,9 @@ class HttpResponse:
     def content_type(self, value):
         self.header_dict['Content-Type'] = value
 
-    def set_cookie(self, name, value, expires=None, max_age=60 * 60, path='/', domain=None, http_only=True, secure=False):
-        v = ['%s=%s' % (quote(name), quote(value))]
+    def set_cookie(self, name, value, expires=None, max_age=60 * 60, path='/', domain=None, http_only=True,
+                   secure=False):
+        v = ['%s=%s' % (url_quote(name), url_quote(value))]
         if not expires:
             pass
         if not max_age:
@@ -524,20 +771,20 @@ class WispyException(Exception):
     pass
 
 
-class BuildRouteException(WispyException):
+class RouteBuildException(WispyException):
     pass
 
 
 class Wispy:
 
-    def __init__(self, static_name='static', static_path=None, template_path=None, *args, **kwargs):
-        self.root_path = os.path.abspath(os.path.dirname(__file__))
+    def __init__(self, static_name='static', static_path=None, template_path=None):
+        self.root_path = os_path.abspath(os_path.dirname(__file__))
 
         if not static_path:
-            self.static_path = os.path.join(self.root_path, 'static')
+            self.static_path = os_path.join(self.root_path, 'static')
 
         if not template_path:
-            self.template_path = os.path.join(self.root_path, 'templates')
+            self.template_path = os_path.join(self.root_path, 'templates')
 
         self.static_name = static_name
 
@@ -547,31 +794,35 @@ class Wispy:
         self.router = Router()
 
         self.template_engine = Environment(
-                loader=PackageLoader('__main__', 'templates'),
-                autoescape=select_autoescape(['html', 'xml']))
+            loader=PackageLoader('__main__', 'templates'),
+            autoescape=select_autoescape(['html', 'xml']))
 
     def get(self, url_path):
         def decorated(callback):
             self.router.add_view_route(url_path, 'GET', callback)
             return callback
+
         return decorated
 
     def post(self, url_path):
         def decorated(callback):
             self.router.add_view_route(url_path, 'POST', callback)
             return callback
+
         return decorated
 
     def options(self, url_path):
         def decorated(callback):
             self.router.add_view_route(url_path, 'OPTIONS', callback)
             return callback
+
         return decorated
 
     def head(self, url_path):
         def decorated(callback):
             self.router.add_view_route(url_path, 'HEAD', callback)
             return callback
+
         return decorated
 
     def view(self, template_name):
@@ -581,7 +832,9 @@ class Wispy:
                 ctx.response.content_type = 'text/html'
                 template = self.template_engine.get_template(template_name)
                 return template.render(**callback(*args, **kwargs))
+
             return decorated
+
         return wrapper
 
     def before_request(self, callback):
@@ -641,31 +894,37 @@ class Wispy:
 
 
 if __name__ == '__main__':
-
     app = Wispy()
+
 
     @app.get('/')
     def index():
+        ctx.request.headers.accept
         ctx.response.set_cookie('index', 'hello')
         ctx.response.set_cookie('index1', 'hello1')
         return 'hello'
+
 
     @app.get('/index/<name>/<username>')
     @app.view('index.html')
     def test(name, username):
         return dict(username=username)
 
+
     @app.get('/home')
     def home():
         return url_redirect(302, 'http://www.baidu.com')
+
 
     @app.get('/user/<int:id>')
     def user(id):
         return str(type(id))
 
+
     @app.get('/user1/<float:id>')
     def test_fload(id):
         return str(type(id))
+
 
     doctest.testmod()
 
