@@ -560,86 +560,106 @@ class HttpRequestHeaders(HttpGeneralHeaders):
     """
     http request headers
     """
-    _HeaderDescriptor = functools.partial(HeaderDescriptor, readonly=True)
+    HeadDesc = functools.partial(HeaderDescriptor, readonly=True, as_interface=True)
 
     def __init__(self, injected):
         self.injected = injected
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def accept(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def accept_charset(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def accept_encoding(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def accept_language(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def authorization(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def expect(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def _from(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def host(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def if_match(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def if_modified_since(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def if_none_match(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def if_range(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def if_unmodified_since(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def max_forwards(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def proxy_authorization(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def range(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def referer(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def te(self):
         pass
 
-    @HeaderDescriptor(readonly=True, as_interface=True)
+    @HeadDesc()
     def user_agent(self):
         pass
+        # SERVER_PORT: 8080
+        # REMOTE_HOST: 
+        # CONTENT_LENGTH: 
+        # SCRIPT_NAME: 
+        # SERVER_PROTOCOL: HTTP/1.1
+        # SERVER_SOFTWARE: WSGIServer/0.2
+        # REQUEST_METHOD: GET
+        # PATH_INFO: /
+        # QUERY_STRING: 
+        # REMOTE_ADDR: 127.0.0.1
+        # CONTENT_TYPE: text/plain
+        # HTTP_HOST: 127.0.0.1:8080
+        # HTTP_CONNECTION: keep-alive
+        # HTTP_CACHE_CONTROL: max-age=0
+        # HTTP_UPGRADE_INSECURE_REQUESTS: 1
+        # HTTP_USER_AGENT: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.67 Safari/537.36
+        # HTTP_ACCEPT: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8
+        # HTTP_ACCEPT_ENCODING: gzip, deflate, br
+        # HTTP_ACCEPT_LANGUAGE: en-US,en;q=0.9
+        # HTTP_COOKIE: index=hello; index1=hello1
 
 
 class HttpRequest:
@@ -857,7 +877,6 @@ class Wispy:
         self.router(ctx.request.path_info, ctx.request.request_method)
 
     def __call__(self, environ, start_response):
-
         ctx.request = HttpRequest(environ)
         ctx.response = HttpResponse()
         ctx.current_app = self
@@ -899,7 +918,7 @@ if __name__ == '__main__':
 
     @app.get('/')
     def index():
-        ctx.request.headers.accept
+        print(ctx.request.headers.user_agent)
         ctx.response.set_cookie('index', 'hello')
         ctx.response.set_cookie('index1', 'hello1')
         return 'hello'
